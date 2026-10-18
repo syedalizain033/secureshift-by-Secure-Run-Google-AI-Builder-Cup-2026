@@ -27,7 +27,7 @@ streamlit run app.py
 
 `.env` already contains your `GEMINI_API_KEY`. Until Firebase is configured, accounts and history live in `data/secure_shift_demo.db`.
 
-## Connect Firebase (what I need from you)
+## Connect Firebase 
 
 1. **Firebase project.** Ideally the same Google Cloud project you deploy Cloud Run to. Send the **Project ID**.
 2. **Web API Key.** Firebase console → Project settings → General → *Your apps*. Add a Web app if there is none, then copy `apiKey`.
