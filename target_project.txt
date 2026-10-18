@@ -1,0 +1,30 @@
+====================================================================
+PROJECT: IdentityAI eKYC Microservice Architecture & Infrastructure
+ENVIRONMENT: Production (US/Global Deployment Tier)
+TARGET COMPLIANCE: SOC 2 Type II, CCPA, GLBA
+====================================================================
+
+1. DATABASE PERSISTENCE LAYER (PostgreSQL RDS)
+--------------------------------------------------------------------
+- Instance Type: db.r6g.2xlarge (Multi-AZ Enabled)
+- Storage Encryption: AES-256 enabled at rest (AWS KMS Managed Key)
+- Schema Security Note: User Social Security Numbers (SSNs) and 
+  Government ID numbers are encrypted at the application layer before insertion.
+
+2. BIOMETRIC FACIAL SCAN & ID DOCUMENT STORAGE (AWS S3)
+--------------------------------------------------------------------
+- Bucket Name: identityai-biometric-vault-prod
+- Region: us-east-1 (US East - N. Virginia)
+  [!] DATA RESIDENCY FLAG: Biometric facial vectors and government ID 
+      scans are currently ingested and persisted in 'us-east-1' 
+      instead of the mandated sovereign local jurisdiction, violating 
+      cross-border data transfer and regional residency governance rules.
+- Lifecycle Expiration Policy: Automated deletion cron configured 
+  to purge raw image payloads after 24 hours (Compliant with CCPA).
+
+3. AUDIT & LOGGING PIPELINE
+--------------------------------------------------------------------
+- CloudWatch Log Group: /aws/lambda/identityai-ekyc-processor
+- Retention Period: 365 Days Immutable Storage
+- Encryption Key: aws/logs (Default AWS Managed Key - Note: Customer-Managed 
+  Key / CMEK rotation pending review).
