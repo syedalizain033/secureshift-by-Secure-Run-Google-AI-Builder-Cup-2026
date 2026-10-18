@@ -1,7 +1,7 @@
 # Secure Shift · Shift-Left GRC Gateway (Demo)
 
 Adversarial AI lead auditor that cross-examines Terraform/SQL artifacts for **IdentityAI** against SOC 2, CCPA and GLBA controls.
-Streamlit + Google Gemini, with email/password login and permanent history in Firebase.
+Streamlit + Google Gemini, with email/password login and permanent history in Google Cloud Firestore.
 
 ## Project layout
 
@@ -9,44 +9,44 @@ Streamlit + Google Gemini, with email/password login and permanent history in Fi
 |---|---|
 | `app.py` | Streamlit UI: login gate, workspace, audit history, activity log |
 | `auditor.py` | Gemini model catalogue, prompts, response schema, retry and failover |
-| `storage.py` | Auth + persistence: Firebase (Auth REST + Firestore) or the local SQLite demo store |
-| `config.py` | **All settings, including the Firebase block** (env vars or `.env`) |
+| `storage.py` | Auth + persistence: Cloud Firestore, or the local SQLite store for tests/offline |
+| `config.py` | **All settings, including Firestore** (env vars or `.env`) |
 | `.streamlit/config.toml` | Theme and runtime settings |
 | `Dockerfile`, `deploy.sh` | Cloud Run image and one-command deploy |
 | `firestore.rules`, `firebase.json` | Locks Firestore to server-side access only |
-| `tests/` | Headless end-to-end smoke test (78 checks) |
+| `tests/` | Headless end-to-end smoke test (85 checks) |
 | `logs/` | Test run log, app log, live Gemini API check |
 
-## Run locally
+## Run locally (writes to your Firestore)
+
+Requires Python 3.11+ (`brew install python@3.12`) and the `gcloud` CLI.
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+/opt/homebrew/bin/python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env                       # then fill in GEMINI_API_KEY and FIRESTORE_PROJECT_ID
+gcloud auth application-default login      # lets the app reach Firestore as you; no key file
+gcloud auth application-default set-quota-project YOUR_PROJECT_ID
 streamlit run app.py
 ```
 
-`.env` already contains your `GEMINI_API_KEY`. Until Firebase is configured, accounts and history live in `data/secure_shift_demo.db`.
+Your Google account needs `roles/datastore.user` (or Owner/Editor) on the project.
+The login footer and the demo ribbon show `Firestore · your-project-id` when connected. If Firestore is unreachable
+on a laptop, the app falls back to `data/secure_shift_demo.db` and shows the reason in a red banner.
+Set `STORAGE_BACKEND=local` to work offline on purpose.
 
-## Connect Firebase 
+## Firestore layout
 
-1. **Firebase project.** Ideally the same Google Cloud project you deploy Cloud Run to. Send the **Project ID**.
-2. **Web API Key.** Firebase console → Project settings → General → *Your apps*. Add a Web app if there is none, then copy `apiKey`.
-3. **Enable Email/Password.** Authentication → Sign-in method → Email/Password → Enable.
-4. **Create Firestore.** Firestore Database → Create database → *Native mode*, production rules, region near your Cloud Run region (e.g. `nam5` / `us-central1`).
-5. **Local testing only:** Project settings → Service accounts → *Generate new private key*. Save it as `firebase-service-account.json` next to `app.py`. Cloud Run in the same project does not need this file.
-6. *(Optional)* `firebase deploy --only firestore:rules` to apply `firestore.rules`.
+| Path | Contents |
+|---|---|
+| `accounts/{email}` | Login credentials: `uid`, `email`, salted PBKDF2-SHA256 `pw_hash`, `salt`, `rounds`, `created_at`. Never the password. |
+| `users/{uid}` | Profile: `email`, `created_at`, `last_login_at`, `active_artifact_id` |
+| `users/{uid}/messages` | Lead Auditor chat history |
+| `users/{uid}/events` | Activity log: sign-ins, sign-outs, failovers, errors |
+| `users/{uid}/audits` | Audit verdicts |
+| `users/{uid}/artifacts` | Submitted files |
 
-Then put the two values in `.env` (or directly in the `FIREBASE` block of `config.py`):
-
-```
-FIREBASE_WEB_API_KEY=AIza...
-FIREBASE_PROJECT_ID=your-project-id
-```
-
-The app switches to Firebase automatically on the next start. The login footer and the demo ribbon show `Firebase · your-project-id`.
-If the API key has *application restrictions* (HTTP referrers), allow server use or remove the restriction, because sign-in calls come from the server.
-
-Firestore layout: `users/{uid}` profile, with sub-collections `artifacts`, `audits`, `messages` and `events`.
+Everything under `users/{uid}` is loaded when that user signs in.
 
 ## Deploy to Cloud Run
 
@@ -58,10 +58,20 @@ gcloud config set project YOUR_PROJECT_ID
 bash deploy.sh                        # REGION=europe-west1 bash deploy.sh to change region
 ```
 
-The script enables the APIs, creates a least-privilege runtime service account, stores `GEMINI_API_KEY` and a Streamlit cookie secret in **Secret Manager**, grants Firestore access, then builds and deploys. It prints the public URL at the end.
+The script enables the APIs, creates a least-privilege runtime service account, stores `GEMINI_API_KEY` and a Streamlit cookie secret in **Secret Manager**, grants its service account `roles/datastore.user` on Firestore, then builds and deploys. It prints the public URL at the end.
 
 Settings it applies: 1 vCPU / 1 GiB, `min-instances=1` (no cold start during judging), session affinity (needed for Streamlit websockets), 60-minute request timeout, gen2 runtime, startup CPU boost.
-Without Firebase it forces `max-instances=1`, because the local store lives inside one container and is wiped on restart.
+On Cloud Run the app never falls back to the in-container store (`ALLOW_LOCAL_FALLBACK=false`); if Firestore is unreachable it shows a retry screen.
+
+If Cloud Run builds automatically on every push to `main` instead, `deploy.sh` is not used. Run this once:
+
+```bash
+SA=$(gcloud run services describe SERVICE --region REGION --format='value(spec.template.spec.serviceAccountName)')
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member "serviceAccount:${SA}" --role roles/datastore.user
+gcloud run services update SERVICE --region REGION \
+  --update-env-vars STORAGE_BACKEND=firestore,FIRESTORE_PROJECT_ID=YOUR_PROJECT_ID,ALLOW_LOCAL_FALLBACK=false \
+  --remove-env-vars FIREBASE_WEB_API_KEY,FIREBASE_PROJECT_ID
+```
 
 ## Before the competition
 
@@ -72,7 +82,7 @@ Without Firebase it forces `max-instances=1`, because the local store lives insi
 ## Tests and logs
 
 ```bash
-python tests/run_smoke.py     # 78 end-to-end checks, no network needed
+python tests/run_smoke.py     # 85 end-to-end checks, no network needed
 ```
 
 - `logs/test_run.log`: smoke-test output
@@ -87,7 +97,7 @@ On Cloud Run, logs stream to Cloud Logging as structured JSON:
 | Symptom | Fix |
 |---|---|
 | "Gemini quota exhausted" | Enable billing, or wait for the daily reset. Keep *Auto-failover* on. |
-| Banner says "Firebase is configured but unavailable" | Firestore database not created, or the runtime service account lacks `roles/datastore.user`. |
-| "Email/password sign-in is disabled" | Enable the provider in Firebase Authentication. |
+| Banner says "Firestore is configured but unavailable" | Database not created, wrong `FIRESTORE_PROJECT_ID`/`FIRESTORE_DATABASE`, or the identity lacks `roles/datastore.user`. Locally, rerun `gcloud auth application-default login`. |
+| "DefaultCredentialsError" locally | Run `gcloud auth application-default login`. |
 | Build fails with a permission error | Grant `roles/run.builder` to `PROJECT_NUMBER-compute@developer.gserviceaccount.com`. |
 | Users signed out after a browser refresh | Expected in this demo. Streamlit sessions are per tab; history is kept in the database. |

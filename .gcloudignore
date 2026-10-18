@@ -18,3 +18,4 @@ venv/
 *.db
 *.db-wal
 *.db-shm
+aibuildercup/

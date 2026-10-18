@@ -272,7 +272,7 @@ for _k, _v in _DEFAULTS.items():
 
 @st.cache_resource(show_spinner=False)
 def get_store():
-    return create_store(config.FIREBASE, config.LOCAL_DB_PATH, config.ALLOW_LOCAL_FALLBACK)
+    return create_store(config.FIRESTORE, config.LOCAL_DB_PATH, config.ALLOW_LOCAL_FALLBACK)
 
 
 try:
@@ -643,8 +643,8 @@ def render_auth():
                     created = st.form_submit_button("Create account", type="primary", **stretch(st.form_submit_button))
                 if created:
                     handle_auth("signup", s_email, s_pw)
-            backend_note = ("Accounts and history are stored in Firebase." if store.kind == "firebase"
-                            else "Accounts are stored in the local demo store until Firebase is connected.")
+            backend_note = ("Accounts and history are stored in Cloud Firestore." if store.kind == "firestore"
+                            else "Accounts and history are stored in the local demo store.")
             st.markdown(f'<div class="auth-foot">{chip(store.label, "info")}<span>{esc(backend_note)}</span></div>',
                         unsafe_allow_html=True)
 

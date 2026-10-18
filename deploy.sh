@@ -9,7 +9,7 @@
 #   1. enables the required Google Cloud APIs
 #   2. creates a least-privilege runtime service account
 #   3. stores GEMINI_API_KEY (+ a Streamlit cookie secret) in Secret Manager
-#   4. grants Firestore access when Firebase is configured in .env
+#   4. grants the runtime service account access to Firestore in PROJECT_ID
 #   5. builds the container with Cloud Build and deploys it to Cloud Run
 # =====================================================================
 set -euo pipefail
@@ -29,13 +29,10 @@ SERVICE="${SERVICE:-secure-shift}"
 MIN_INSTANCES="${MIN_INSTANCES:-1}"     # 1 = no cold starts during the demo
 MAX_INSTANCES="${MAX_INSTANCES:-3}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-gemini-3.8-flash}"
-FIREBASE_WEB_API_KEY="${FIREBASE_WEB_API_KEY:-}"
-FIREBASE_PROJECT_ID="${FIREBASE_PROJECT_ID:-}"
-FIREBASE_SERVICE_ACCOUNT_FILE="${FIREBASE_SERVICE_ACCOUNT_FILE:-./firebase-service-account.json}"
+FIRESTORE_DATABASE="${FIRESTORE_DATABASE:-(default)}"
 
 GEMINI_SECRET="${SERVICE}-gemini-key"
 COOKIE_SECRET="${SERVICE}-cookie-secret"
-FIREBASE_SA_SECRET="${SERVICE}-firebase-sa"
 RUN_SA_NAME="${SERVICE}-run"
 
 say()  { printf "\n\033[1;34m==> %s\033[0m\n" "$*"; }
@@ -51,22 +48,12 @@ gcloud auth print-access-token >/dev/null 2>&1 || die "Not logged in. Run: gclou
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 RUN_SA="${RUN_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 BUILD_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-FIREBASE_ON=false
-[[ -n "$FIREBASE_WEB_API_KEY" && -n "$FIREBASE_PROJECT_ID" ]] && FIREBASE_ON=true
 
-say "Project ${PROJECT_ID} (${PROJECT_NUMBER}) · region ${REGION} · service ${SERVICE} · firebase=${FIREBASE_ON}"
-
-if [[ "$FIREBASE_ON" != true ]]; then
-  warn "Firebase is not configured - the app will use the local demo store inside the container."
-  warn "History then lives in one instance and is lost on restart. Forcing MAX_INSTANCES=1."
-  MAX_INSTANCES=1
-  [[ "$MIN_INSTANCES" -gt 1 ]] && MIN_INSTANCES=1
-fi
+say "Project ${PROJECT_ID} (${PROJECT_NUMBER}) · region ${REGION} · service ${SERVICE} · firestore=${FIRESTORE_DATABASE}"
 
 # ---------- APIs ----------
 say "Enabling APIs (first run can take a minute)"
-APIS="run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com iam.googleapis.com"
-[[ "$FIREBASE_ON" == true && "$FIREBASE_PROJECT_ID" == "$PROJECT_ID" ]] && APIS="$APIS firestore.googleapis.com identitytoolkit.googleapis.com"
+APIS="run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com iam.googleapis.com firestore.googleapis.com"
 # shellcheck disable=SC2086
 gcloud services enable $APIS --project "$PROJECT_ID"
 
@@ -115,26 +102,15 @@ else
 fi
 SECRETS="GEMINI_API_KEY=${GEMINI_SECRET}:latest,STREAMLIT_SERVER_COOKIE_SECRET=${COOKIE_SECRET}:latest"
 
-# ---------- Firebase / Firestore access ----------
-if [[ "$FIREBASE_ON" == true ]]; then
-  if [[ "$FIREBASE_PROJECT_ID" == "$PROJECT_ID" ]]; then
-    say "Granting Firestore access (same project - no key file needed)"
-    gcloud projects add-iam-policy-binding "$PROJECT_ID" --member "serviceAccount:${RUN_SA}" \
-      --role roles/datastore.user --condition=None --quiet >/dev/null
-  elif [[ -f "$FIREBASE_SERVICE_ACCOUNT_FILE" ]]; then
-    say "Firebase lives in another project - uploading its service-account key as a secret"
-    upsert_secret "$FIREBASE_SA_SECRET" "$(cat "$FIREBASE_SERVICE_ACCOUNT_FILE")"
-    SECRETS="${SECRETS},FIREBASE_SERVICE_ACCOUNT_JSON=${FIREBASE_SA_SECRET}:latest"
-  else
-    die "FIREBASE_PROJECT_ID (${FIREBASE_PROJECT_ID}) differs from PROJECT_ID (${PROJECT_ID}) and ${FIREBASE_SERVICE_ACCOUNT_FILE} was not found."
-  fi
-fi
+# ---------- Firestore access ----------
+say "Granting Firestore access to ${RUN_SA} (no key file needed)"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member "serviceAccount:${RUN_SA}" \
+  --role roles/datastore.user --condition=None --quiet >/dev/null
 
 # ---------- deploy ----------
 say "Building and deploying ${SERVICE} (Cloud Build, ~3-5 minutes)"
-ENV_VARS="^@^DEMO_MODE=true@DEFAULT_MODEL=${DEFAULT_MODEL}@LOG_LEVEL=INFO@FIREBASE_WEB_API_KEY=${FIREBASE_WEB_API_KEY}@FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}"
-# With Firebase on, never silently fall back to per-container storage; a transient error is retried instead.
-[[ "$FIREBASE_ON" == true ]] && ENV_VARS="${ENV_VARS}@ALLOW_LOCAL_FALLBACK=false"
+# Never silently fall back to per-container storage on Cloud Run; a transient error shows a retry screen instead.
+ENV_VARS="^@^DEMO_MODE=true@DEFAULT_MODEL=${DEFAULT_MODEL}@LOG_LEVEL=INFO@STORAGE_BACKEND=firestore@FIRESTORE_PROJECT_ID=${PROJECT_ID}@FIRESTORE_DATABASE=${FIRESTORE_DATABASE}@ALLOW_LOCAL_FALLBACK=false"
 
 gcloud run deploy "$SERVICE" \
   --project "$PROJECT_ID" \

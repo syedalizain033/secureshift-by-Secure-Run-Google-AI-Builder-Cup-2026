@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/z.naqvi/.config/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(which brew *)",
+      "Read(//opt/homebrew/opt/**)",
+      "Read(//Library/Frameworks/Python.framework/**)",
+      "Bash(python3 -c \"import ast,sys; ast.parse\\(open\\('storage.py'\\).read\\(\\)\\)\")",
+      "Bash(python3 -)",
+      "Bash(python3 - /private/tmp/claude-502/-Users-z-naqvi-Downloads-secureshift-by-Secure-Run-Google-AI-Builder-Cup-2026-Main/5fa5e3e7-10e3-40d4-98f3-17f113b60186/scratchpad/s17.py)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('tests/run_smoke.py'\\).read\\(\\)\\)\")",
+      "Bash(/usr/bin/python3 tests/run_smoke.py)",
+      "Bash(bash -n deploy.sh)",
+      "Bash(echo \"exit=$?\")",
+      "Bash([ -f \"$f\" ])"
+    ]
+  }
+}

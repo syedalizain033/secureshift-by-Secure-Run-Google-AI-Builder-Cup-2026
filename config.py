@@ -2,8 +2,7 @@
 Secure Shift - central configuration.
 
 Every setting can come from an environment variable (Cloud Run, Secret Manager)
-or from a local `.env` file next to this module. Values typed directly into the
-FIREBASE block below also work, but env vars always win.
+or from a local `.env` file next to this module. Env vars always win.
 """
 
 import json
@@ -46,39 +45,31 @@ DEMO_MODE = _bool("DEMO_MODE", True)  # shows the "Demo" ribbon and "Demo Login"
 # ------------------------------------------------------------------
 # Gemini
 # ------------------------------------------------------------------
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# Demo only: key committed on purpose so the container needs no env vars. Prod sets GEMINI_API_KEY instead.
+DEMO_GEMINI_API_KEY = "PASTE_YOUR_GEMINI_API_KEY_HERE"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or ("" if DEMO_GEMINI_API_KEY.startswith("PASTE_") else DEMO_GEMINI_API_KEY)
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-3.8-flash")
 
 # ------------------------------------------------------------------
-# FIREBASE  <<<  paste your project values here (or set the env vars)  >>>
+# Storage: Google Cloud Firestore (accounts, chat history, audits, activity log)
 # ------------------------------------------------------------------
-# As soon as `web_api_key` and `project_id` are filled in, the app switches
-# from the local demo store to Firebase Authentication + Cloud Firestore.
-FIREBASE = {
-    # Firebase console > Project settings > General > "Web API Key"
-    "web_api_key": os.getenv("FIREBASE_WEB_API_KEY", "AIzaSyAJuBq6L6CuJgMVy42QTeZEFBnirpAU-jY"),
-    # Firebase console > Project settings > General > "Project ID"
-    "project_id": os.getenv("FIREBASE_PROJECT_ID", "shift-3cd38"),
-    # Local runs only: path to a service-account key (Project settings > Service accounts).
-    # On Cloud Run in the same project, leave it absent - the runtime service account is used.
-    "service_account_file": os.getenv(
-        "FIREBASE_SERVICE_ACCOUNT_FILE", str(BASE_DIR / "firebase-service-account.json")
-    ),
-    # Alternative to the file: the raw JSON (e.g. mounted from Secret Manager).
-    "service_account_json": os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", ""),
+# Credentials come from Application Default Credentials - no key file:
+#   * Cloud Run: the service's runtime service account (needs roles/datastore.user).
+#   * Laptop:    `gcloud auth application-default login`.
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "firestore").strip().lower()  # firestore | local
+FIRESTORE = {
+    "enabled": STORAGE_BACKEND == "firestore",
+    # Demo default: the Secure Shift project. Prod can override with FIRESTORE_PROJECT_ID.
+    "project_id": os.getenv("FIRESTORE_PROJECT_ID", "gen-lang-client-0853833521").strip(),
+    "database": os.getenv("FIRESTORE_DATABASE", "(default)").strip() or "(default)",
 }
 
-
-def firebase_configured() -> bool:
-    return bool(FIREBASE["web_api_key"] and FIREBASE["project_id"])
-
-
-# If Firebase is configured but unreachable, keep the demo running on the local store
-# (with a visible warning) instead of locking everyone out.
-ALLOW_LOCAL_FALLBACK = _bool("ALLOW_LOCAL_FALLBACK", True)
+# If Firestore is unreachable: on a laptop, keep running on the local store with a visible
+# warning; on Cloud Run, show a retry screen instead of silently writing to the container.
+ALLOW_LOCAL_FALLBACK = _bool("ALLOW_LOCAL_FALLBACK", not ON_CLOUD_RUN)
 
 # ------------------------------------------------------------------
-# Local demo store (used until Firebase is configured)
+# Local store (tests, or fallback when Firestore is unreachable)
 # ------------------------------------------------------------------
 LOCAL_DB_PATH = os.getenv("LOCAL_DB_PATH", str(BASE_DIR / "data" / "secure_shift_demo.db"))
 
@@ -139,5 +130,5 @@ def setup_logging() -> None:
 
     logger._secure_shift_configured = True  # type: ignore[attr-defined]
     logger.info(
-        "Logging ready (version=%s, cloud_run=%s, firebase=%s)", APP_VERSION, ON_CLOUD_RUN, firebase_configured()
+        "Logging ready (version=%s, cloud_run=%s, storage=%s)", APP_VERSION, ON_CLOUD_RUN, STORAGE_BACKEND
     )

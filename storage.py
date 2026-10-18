@@ -3,11 +3,15 @@ Secure Shift - authentication and persistence.
 
 Two interchangeable backends expose the same interface:
 
-* FirebaseStore - Firebase Authentication (email/password, REST) + Cloud Firestore.
-* LocalStore    - SQLite + PBKDF2 password hashes. Used automatically until the
-                  Firebase settings in config.py are filled in.
+* FirestoreStore - Google Cloud Firestore for accounts and history. Authenticates with
+                   Application Default Credentials (Cloud Run service account, or
+                   `gcloud auth application-default login` on a laptop).
+* LocalStore     - SQLite. Used for tests, or as a fallback when Firestore is unreachable.
+
+Both store salted PBKDF2-SHA256 password hashes, never the password itself.
 
 Data model (identical in both backends)
+    accounts/{email}                 credentials: uid, email, pw_hash, salt, rounds, created_at
     users/{uid}                      profile: email, created_at, last_login_at, active_artifact_id
     users/{uid}/artifacts/{id}       submitted files (name, content, size, sha256, source)
     users/{uid}/audits/{id}          audit runs (artifact_id, controls, model, result, latency)
@@ -30,13 +34,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-import requests
-
 log = logging.getLogger("secure_shift.storage")
 
 COLLECTIONS = ("artifacts", "audits", "messages", "events")
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+EMAIL_RE = re.compile(r"^[^@\s/]+@[^@\s/]+\.[^@\s/]{2,}$")  # no "/": the email is a Firestore document id
 MIN_PASSWORD = 8
+PBKDF2_ROUNDS = 310_000
 
 
 def utcnow_iso() -> str:
@@ -83,6 +86,10 @@ def _pbkdf2_sha256(password: bytes, salt: bytes, rounds: int) -> bytes:
     return acc.to_bytes(32, "big")
 
 
+def _hash_password(password: str, salt_hex: str, rounds: int = PBKDF2_ROUNDS) -> str:
+    return _pbkdf2_sha256(password.encode(), bytes.fromhex(salt_hex), rounds).hex()
+
+
 def _validate(email: str, password: str, signup: bool = False) -> str:
     email = (email or "").strip().lower()
     if not EMAIL_RE.match(email):
@@ -103,7 +110,6 @@ class LocalStore:
     kind = "local"
     label = "Local demo store"
     supports_password_reset = False
-    _PBKDF2_ROUNDS = 310_000
 
     def __init__(self, path: str, degraded_reason: str | None = None):
         self.path = path
@@ -132,7 +138,7 @@ class LocalStore:
         return conn
 
     def _hash(self, password: str, salt_hex: str) -> str:
-        return _pbkdf2_sha256(password.encode(), bytes.fromhex(salt_hex), self._PBKDF2_ROUNDS).hex()
+        return _hash_password(password, salt_hex)
 
     # --- auth -------------------------------------------------------
     def sign_up(self, email: str, password: str) -> User:
@@ -163,7 +169,7 @@ class LocalStore:
         return User(row["uid"], row["email"])
 
     def send_password_reset(self, email: str) -> None:
-        raise AuthError("Password reset becomes available once Firebase is connected.")
+        raise AuthError("Password reset is not available in this demo.")
 
     # --- data -------------------------------------------------------
     def add(self, uid: str, collection: str, data: dict) -> str:
@@ -202,97 +208,70 @@ class LocalStore:
 
 
 # ======================================================================
-# Firebase backend (Auth REST + Firestore via Admin SDK)
+# Cloud Firestore backend
 # ======================================================================
-_FIREBASE_ERRORS = {
-    "EMAIL_EXISTS": "An account with this email already exists. Sign in instead.",
-    "EMAIL_NOT_FOUND": "Incorrect email or password.",
-    "INVALID_PASSWORD": "Incorrect email or password.",
-    "INVALID_LOGIN_CREDENTIALS": "Incorrect email or password.",
-    "USER_DISABLED": "This account has been disabled. Contact your administrator.",
-    "TOO_MANY_ATTEMPTS_TRY_LATER": "Too many attempts. Wait a few minutes and try again.",
-    "WEAK_PASSWORD": f"Password is too weak. Use at least {MIN_PASSWORD} characters.",
-    "INVALID_EMAIL": "Enter a valid email address.",
-    "MISSING_PASSWORD": "Enter your password.",
-    "OPERATION_NOT_ALLOWED": "Email/password sign-in is disabled. Enable it in Firebase console > Authentication > Sign-in method.",
-    "CONFIGURATION_NOT_FOUND": "Firebase Authentication is not set up. Open Firebase console > Authentication > Get started.",
-    "PASSWORD_LOGIN_DISABLED": "Email/password sign-in is disabled for this project.",
-}
+class FirestoreStore:
+    kind = "firestore"
+    supports_password_reset = False
+    ACCOUNTS = "accounts"
+    USERS = "users"
 
+    def __init__(self, project_id: str = "", database: str = "(default)"):
+        from google.cloud import firestore
 
-class FirebaseStore:
-    kind = "firebase"
-    supports_password_reset = True
-    _IDENTITY = "https://identitytoolkit.googleapis.com/v1/accounts:{}"
-
-    def __init__(self, cfg: dict):
-        self.api_key = cfg["web_api_key"]
-        self.project_id = cfg["project_id"]
-        self.label = f"Firebase · {self.project_id}"
+        # Blank project_id -> the project of the active credentials (Cloud Run: the service's own project).
+        self._db = firestore.Client(project=project_id or None, database=database or "(default)")
+        self.project_id = self._db.project
+        self.database = database or "(default)"
+        suffix = "" if self.database == "(default)" else f" / {self.database}"
+        self.label = f"Firestore · {self.project_id}{suffix}"
         self.degraded_reason = None
-        self._db = self._init_firestore(cfg)
-        log.info("Firebase store ready (project=%s)", self.project_id)
+        self._db.collection("_meta").document("health").get(timeout=15)  # fail fast if DB missing / no access
+        log.info("Firestore store ready (project=%s, database=%s)", self.project_id, self.database)
 
-    # --- setup ------------------------------------------------------
-    def _init_firestore(self, cfg: dict):
-        import firebase_admin
-        from firebase_admin import credentials, firestore
-
-        try:
-            app = firebase_admin.get_app()
-        except ValueError:
-            if cfg.get("service_account_json"):
-                cred = credentials.Certificate(json.loads(cfg["service_account_json"]))
-            elif cfg.get("service_account_file") and os.path.exists(cfg["service_account_file"]):
-                cred = credentials.Certificate(cfg["service_account_file"])
-            else:
-                cred = credentials.ApplicationDefault()  # Cloud Run runtime service account
-            app = firebase_admin.initialize_app(cred, {"projectId": self.project_id})
-        db = firestore.client(app)
-        db.collection("_meta").document("health").get(timeout=15)  # fail fast if DB missing / no access
-        return db
-
-    # --- auth (Identity Toolkit REST) -------------------------------
-    def _identity(self, action: str, payload: dict) -> dict:
-        try:
-            resp = requests.post(self._IDENTITY.format(action), params={"key": self.api_key}, json=payload, timeout=15)
-        except requests.RequestException as exc:
-            log.error("Firebase Auth unreachable: %s", type(exc).__name__)  # message would include the key param
-            raise AuthError("The sign-in service is unreachable. Check your connection and try again.") from exc
-        try:
-            data = resp.json()
-        except ValueError:
-            data = {}
-        if resp.ok:
-            return data
-        raw = str((data.get("error") or {}).get("message", f"HTTP_{resp.status_code}"))
-        code = raw.split(" ", 1)[0].strip(":")
-        log.warning("Firebase Auth %s rejected: %s", action, raw)
-        if "API key not valid" in raw or code == "API_KEY_INVALID":
-            raise AuthError("Firebase Web API key is invalid. Check FIREBASE_WEB_API_KEY in config.")
-        raise AuthError(_FIREBASE_ERRORS.get(code, f"Sign-in failed ({code})."))
+    # --- auth -------------------------------------------------------
+    def _account_doc(self, email: str):
+        return self._db.collection(self.ACCOUNTS).document(email)
 
     def sign_up(self, email: str, password: str) -> User:
         email = _validate(email, password, signup=True)
-        data = self._identity("signUp", {"email": email, "password": password, "returnSecureToken": True})
-        user = User(data["localId"], data.get("email", email))
-        self.update_profile(user.uid, {"email": user.email, "created_at": utcnow_iso()})
-        return user
+        salt = secrets.token_hex(16)
+        uid = uuid.uuid4().hex
+        now = utcnow_iso()
+        try:
+            # create() fails if the document exists, so two sign-ups for one email can't both win.
+            self._account_doc(email).create({
+                "uid": uid, "email": email, "pw_hash": _hash_password(password, salt), "salt": salt,
+                "kdf": "pbkdf2_sha256", "rounds": PBKDF2_ROUNDS, "created_at": now,
+            })
+        except Exception as exc:
+            if type(exc).__name__ == "AlreadyExists":
+                raise AuthError("An account with this email already exists. Sign in instead.") from None
+            raise StorageError(str(exc)) from exc
+        self.update_profile(uid, {"email": email, "created_at": now})
+        return User(uid, email)
 
     def sign_in(self, email: str, password: str) -> User:
         email = _validate(email, password)
-        data = self._identity("signInWithPassword", {"email": email, "password": password, "returnSecureToken": True})
-        return User(data["localId"], data.get("email", email))
+        try:
+            snap = self._account_doc(email).get(timeout=15)
+        except Exception as exc:
+            raise StorageError(str(exc)) from exc
+        rec = snap.to_dict() if snap.exists else None
+        if not rec:
+            _hash_password(password, "00" * 16)  # equalise timing so emails can't be enumerated
+            raise AuthError("Incorrect email or password.")
+        actual = _hash_password(password, rec["salt"], int(rec.get("rounds") or PBKDF2_ROUNDS))
+        if not hmac.compare_digest(actual, rec["pw_hash"]):
+            raise AuthError("Incorrect email or password.")
+        return User(rec["uid"], rec["email"])
 
     def send_password_reset(self, email: str) -> None:
-        email = (email or "").strip().lower()
-        if not EMAIL_RE.match(email):
-            raise AuthError("Enter a valid email address.")
-        self._identity("sendOobCode", {"requestType": "PASSWORD_RESET", "email": email})
+        raise AuthError("Password reset is not available in this demo.")
 
-    # --- data (Firestore) -------------------------------------------
+    # --- data -------------------------------------------------------
     def _user_doc(self, uid: str):
-        return self._db.collection("users").document(uid)
+        return self._db.collection(self.USERS).document(uid)
 
     def add(self, uid: str, collection: str, data: dict) -> str:
         payload = {**data, "created_at": data.get("created_at") or utcnow_iso()}
@@ -329,14 +308,14 @@ class FirebaseStore:
 # ======================================================================
 # Factory
 # ======================================================================
-def create_store(firebase_cfg: dict, local_path: str, allow_fallback: bool = True):
-    if firebase_cfg.get("web_api_key") and firebase_cfg.get("project_id"):
+def create_store(firestore_cfg: dict, local_path: str, allow_fallback: bool = True):
+    if firestore_cfg.get("enabled"):
         try:
-            return FirebaseStore(firebase_cfg)
-        except Exception as exc:  # missing package, DB not created, no IAM access...
-            log.exception("Firebase is configured but unavailable")
+            return FirestoreStore(firestore_cfg.get("project_id", ""), firestore_cfg.get("database", "(default)"))
+        except Exception as exc:  # missing package, no credentials, DB not created, no IAM access...
+            log.exception("Firestore is configured but unavailable")
             if not allow_fallback:
                 raise
-            reason = f"Firebase is configured but unavailable ({type(exc).__name__}: {str(exc)[:160]})."
+            reason = f"Firestore is configured but unavailable ({type(exc).__name__}: {str(exc)[:160]})."
             return LocalStore(local_path, degraded_reason=reason)
     return LocalStore(local_path)
