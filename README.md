@@ -1,4 +1,3 @@
-# AI Builder Cup 2026
 # Secure Shift · Shift-Left GRC Gateway (Demo)
 
 Adversarial AI lead auditor that cross-examines Terraform/SQL artifacts for **IdentityAI** against SOC 2, CCPA and GLBA controls.
