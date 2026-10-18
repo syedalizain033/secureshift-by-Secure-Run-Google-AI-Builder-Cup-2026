@@ -1,4 +1,5 @@
 """
+AI Builders Cup
 Secure Shift - Autonomous AI-Driven Lead Auditor & Shift-Left GRC Gateway
 Reference target: IdentityAI (eKYC platform)
 Regulatory standards: SOC 2 Type II, CCPA, GLBA
