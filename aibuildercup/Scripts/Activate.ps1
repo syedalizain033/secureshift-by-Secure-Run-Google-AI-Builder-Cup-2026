@@ -1,0 +1,544 @@
+<#
+.Synopsis
+Activate a Python virtual environment for the current PowerShell session.
+
+.Description
+Pushes the python executable for a virtual environment to the front of the
+$Env:PATH environment variable and sets the prompt to signify that you are
+in a Python virtual environment. Makes use of the command line switches as
+well as the `pyvenv.cfg` file values present in the virtual environment.
+
+.Parameter VenvDir
+Path to the directory that contains the virtual environment to activate. The
+default value for this is the parent of the directory that the Activate.ps1
+script is located within.
+
+.Parameter Prompt
+The prompt prefix to display when this virtual environment is activated. By
+default, this prompt is the name of the virtual environment folder (VenvDir)
+surrounded by parentheses and followed by a single space (ie. '(.venv) ').
+
+.Example
+Activate.ps1
+Activates the Python virtual environment that contains the Activate.ps1 script.
+
+.Example
+Activate.ps1 -Verbose
+Activates the Python virtual environment that contains the Activate.ps1 script,
+and shows extra information about the activation as it executes.
+
+.Example
+Activate.ps1 -VenvDir C:\Users\MyUser\Common\.venv
+Activates the Python virtual environment located in the specified location.
+
+.Example
+Activate.ps1 -Prompt "MyPython"
+Activates the Python virtual environment that contains the Activate.ps1 script,
+and prefixes the current prompt with the specified string (surrounded in
+parentheses) while the virtual environment is active.
+
+.Notes
+On Windows, it may be required to enable this Activate.ps1 script by setting the
+execution policy for the user. You can do this by issuing the following PowerShell
+command:
+
+PS C:\> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+For more information on Execution Policies: 
+https://go.microsoft.com/fwlink/?LinkID=135170
+
+#>
+Param(
+    [Parameter(Mandatory = $false)]
+    [String]
+    $VenvDir,
+    [Parameter(Mandatory = $false)]
+    [String]
+    $Prompt
+)
+
+<# Function declarations --------------------------------------------------- #>
+
+<#
+.Synopsis
+Remove all shell session elements added by the Activate script, including the
+addition of the virtual environment's Python executable from the beginning of
+the PATH variable.
+
+.Parameter NonDestructive
+If present, do not remove this function from the global namespace for the
+session.
+
+#>
+function global:deactivate ([switch]$NonDestructive) {
+    # Revert to original values
+
+    # The prior prompt:
+    if (Test-Path -Path Function:_OLD_VIRTUAL_PROMPT) {
+        Copy-Item -Path Function:_OLD_VIRTUAL_PROMPT -Destination Function:prompt
+        Remove-Item -Path Function:_OLD_VIRTUAL_PROMPT
+    }
+
+    # The prior PYTHONHOME:
+    if (Test-Path -Path Env:_OLD_VIRTUAL_PYTHONHOME) {
+        Copy-Item -Path Env:_OLD_VIRTUAL_PYTHONHOME -Destination Env:PYTHONHOME
+        Remove-Item -Path Env:_OLD_VIRTUAL_PYTHONHOME
+    }
+
+    # The prior PATH:
+    if (Test-Path -Path Env:_OLD_VIRTUAL_PATH) {
+        Copy-Item -Path Env:_OLD_VIRTUAL_PATH -Destination Env:PATH
+        Remove-Item -Path Env:_OLD_VIRTUAL_PATH
+    }
+
+    # Just remove the VIRTUAL_ENV altogether:
+    if (Test-Path -Path Env:VIRTUAL_ENV) {
+        Remove-Item -Path env:VIRTUAL_ENV
+    }
+
+    # Just remove VIRTUAL_ENV_PROMPT altogether.
+    if (Test-Path -Path Env:VIRTUAL_ENV_PROMPT) {
+        Remove-Item -Path env:VIRTUAL_ENV_PROMPT
+    }
+
+    # Just remove the _PYTHON_VENV_PROMPT_PREFIX altogether:
+    if (Get-Variable -Name "_PYTHON_VENV_PROMPT_PREFIX" -ErrorAction SilentlyContinue) {
+        Remove-Variable -Name _PYTHON_VENV_PROMPT_PREFIX -Scope Global -Force
+    }
+
+    # Leave deactivate function in the global namespace if requested:
+    if (-not $NonDestructive) {
+        Remove-Item -Path function:deactivate
+    }
+}
+
+<#
+.Description
+Get-PyVenvConfig parses the values from the pyvenv.cfg file located in the
+given folder, and returns them in a map.
+
+For each line in the pyvenv.cfg file, if that line can be parsed into exactly
+two strings separated by `=` (with any amount of whitespace surrounding the =)
+then it is considered a `key = value` line. The left hand string is the key,
+the right hand is the value.
+
+If the value starts with a `'` or a `"` then the first and last character is
+stripped from the value before being captured.
+
+.Parameter ConfigDir
+Path to the directory that contains the `pyvenv.cfg` file.
+#>
+function Get-PyVenvConfig(
+    [String]
+    $ConfigDir
+) {
+    Write-Verbose "Given ConfigDir=$ConfigDir, obtain values in pyvenv.cfg"
+
+    # Ensure the file exists, and issue a warning if it doesn't (but still allow the function to continue).
+    $pyvenvConfigPath = Join-Path -Resolve -Path $ConfigDir -ChildPath 'pyvenv.cfg' -ErrorAction Continue
+
+    # An empty map will be returned if no config file is found.
+    $pyvenvConfig = @{ }
+
+    if ($pyvenvConfigPath) {
+
+        Write-Verbose "File exists, parse `key = value` lines"
+        $pyvenvConfigContent = Get-Content -Path $pyvenvConfigPath
+
+        $pyvenvConfigContent | ForEach-Object {
+            $keyval = $PSItem -split "\s*=\s*", 2
+            if ($keyval[0] -and $keyval[1]) {
+                $val = $keyval[1]
+
+                # Remove extraneous quotations around a string value.
+                if ("'""".Contains($val.Substring(0, 1))) {
+                    $val = $val.Substring(1, $val.Length - 2)
+                }
+
+                $pyvenvConfig[$keyval[0]] = $val
+                Write-Verbose "Adding Key: '$($keyval[0])'='$val'"
+            }
+        }
+    }
+    return $pyvenvConfig
+}
+
+
+<# Begin Activate script --------------------------------------------------- #>
+
+# Determine the containing directory of this script
+$VenvExecPath = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$VenvExecDir = Get-Item -Path $VenvExecPath
+
+Write-Verbose "Activation script is located in path: '$VenvExecPath'"
+Write-Verbose "VenvExecDir Fullname: '$($VenvExecDir.FullName)"
+Write-Verbose "VenvExecDir Name: '$($VenvExecDir.Name)"
+
+# Set values required in priority: CmdLine, ConfigFile, Default
+# First, get the location of the virtual environment, it might not be
+# VenvExecDir if specified on the command line.
+if ($VenvDir) {
+    Write-Verbose "VenvDir given as parameter, using '$VenvDir' to determine values"
+}
+else {
+    Write-Verbose "VenvDir not given as a parameter, using parent directory name as VenvDir."
+    $VenvDir = $VenvExecDir.Parent.FullName.TrimEnd("\\/")
+    Write-Verbose "VenvDir=$VenvDir"
+}
+
+# Next, read the `pyvenv.cfg` file to determine any required value such
+# as `prompt`.
+$pyvenvCfg = Get-PyVenvConfig -ConfigDir $VenvDir
+
+# Next, set the prompt from the command line, or the config file, or
+# just use the name of the virtual environment folder.
+if ($Prompt) {
+    Write-Verbose "Prompt specified as argument, using '$Prompt'"
+}
+else {
+    Write-Verbose "Prompt not specified as argument to script, checking pyvenv.cfg value"
+    if ($pyvenvCfg -and $pyvenvCfg['prompt']) {
+        Write-Verbose "  Setting based on value in pyvenv.cfg='$($pyvenvCfg['prompt'])'"
+        $Prompt = $pyvenvCfg['prompt'];
+    }
+    else {
+        Write-Verbose "  Setting prompt based on parent's directory's name. (Is the directory name passed to venv module when creating the virtual environment)"
+        Write-Verbose "  Got leaf-name of $VenvDir='$(Split-Path -Path $venvDir -Leaf)'"
+        $Prompt = Split-Path -Path $venvDir -Leaf
+    }
+}
+
+Write-Verbose "Prompt = '$Prompt'"
+Write-Verbose "VenvDir='$VenvDir'"
+
+# Deactivate any currently active virtual environment, but leave the
+# deactivate function in place.
+deactivate -nondestructive
+
+# Now set the environment variable VIRTUAL_ENV, used by many tools to determine
+# that there is an activated venv.
+$env:VIRTUAL_ENV = $VenvDir
+
+$env:VIRTUAL_ENV_PROMPT = $Prompt
+
+if (-not $Env:VIRTUAL_ENV_DISABLE_PROMPT) {
+
+    Write-Verbose "Setting prompt to '$Prompt'"
+
+    # Set the prompt to include the env name
+    # Make sure _OLD_VIRTUAL_PROMPT is global
+    function global:_OLD_VIRTUAL_PROMPT { "" }
+    Copy-Item -Path function:prompt -Destination function:_OLD_VIRTUAL_PROMPT
+    New-Variable -Name _PYTHON_VENV_PROMPT_PREFIX -Description "Python virtual environment prompt prefix" -Scope Global -Option ReadOnly -Visibility Public -Value $Prompt
+
+    function global:prompt {
+        Write-Host -NoNewline -ForegroundColor Green "($_PYTHON_VENV_PROMPT_PREFIX) "
+        _OLD_VIRTUAL_PROMPT
+    }
+}
+
+# Clear PYTHONHOME
+if (Test-Path -Path Env:PYTHONHOME) {
+    Copy-Item -Path Env:PYTHONHOME -Destination Env:_OLD_VIRTUAL_PYTHONHOME
+    Remove-Item -Path Env:PYTHONHOME
+}
+
+# Add the venv to the PATH
+Copy-Item -Path Env:PATH -Destination Env:_OLD_VIRTUAL_PATH
+$Env:PATH = "$VenvExecDir$([System.IO.Path]::PathSeparator)$Env:PATH"
+
+# SIG # Begin signature block
+# MII27AYJKoZIhvcNAQcCoII23TCCNtkCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBALKwKRFIhr2RY
+# IW/WJLd9pc8a9sj/IoThKU92fTfKsKCCG1wwggXMMIIDtKADAgECAhBUmNLR1FsZ
+# lUgTecgRwIeZMA0GCSqGSIb3DQEBDAUAMHcxCzAJBgNVBAYTAlVTMR4wHAYDVQQK
+# ExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xSDBGBgNVBAMTP01pY3Jvc29mdCBJZGVu
+# dGl0eSBWZXJpZmljYXRpb24gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAy
+# MDAeFw0yMDA0MTYxODM2MTZaFw00NTA0MTYxODQ0NDBaMHcxCzAJBgNVBAYTAlVT
+# MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xSDBGBgNVBAMTP01pY3Jv
+# c29mdCBJZGVudGl0eSBWZXJpZmljYXRpb24gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRo
+# b3JpdHkgMjAyMDCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALORKgeD
+# Bmf9np3gx8C3pOZCBH8Ppttf+9Va10Wg+3cL8IDzpm1aTXlT2KCGhFdFIMeiVPvH
+# or+Kx24186IVxC9O40qFlkkN/76Z2BT2vCcH7kKbK/ULkgbk/WkTZaiRcvKYhOuD
+# PQ7k13ESSCHLDe32R0m3m/nJxxe2hE//uKya13NnSYXjhr03QNAlhtTetcJtYmrV
+# qXi8LW9J+eVsFBT9FMfTZRY33stuvF4pjf1imxUs1gXmuYkyM6Nix9fWUmcIxC70
+# ViueC4fM7Ke0pqrrBc0ZV6U6CwQnHJFnni1iLS8evtrAIMsEGcoz+4m+mOJyoHI1
+# vnnhnINv5G0Xb5DzPQCGdTiO0OBJmrvb0/gwytVXiGhNctO/bX9x2P29Da6SZEi3
+# W295JrXNm5UhhNHvDzI9e1eM80UHTHzgXhgONXaLbZ7LNnSrBfjgc10yVpRnlyUK
+# xjU9lJfnwUSLgP3B+PR0GeUw9gb7IVc+BhyLaxWGJ0l7gpPKWeh1R+g/OPTHU3mg
+# trTiXFHvvV84wRPmeAyVWi7FQFkozA8kwOy6CXcjmTimthzax7ogttc32H83rwjj
+# O3HbbnMbfZlysOSGM1l0tRYAe1BtxoYT2v3EOYI9JACaYNq6lMAFUSw0rFCZE4e7
+# swWAsk0wAly4JoNdtGNz764jlU9gKL431VulAgMBAAGjVDBSMA4GA1UdDwEB/wQE
+# AwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTIftJqhSobyhmYBAcnz1AQ
+# T2ioojAQBgkrBgEEAYI3FQEEAwIBADANBgkqhkiG9w0BAQwFAAOCAgEAr2rd5hnn
+# LZRDGU7L6VCVZKUDkQKL4jaAOxWiUsIWGbZqWl10QzD0m/9gdAmxIR6QFm3FJI9c
+# Zohj9E/MffISTEAQiwGf2qnIrvKVG8+dBetJPnSgaFvlVixlHIJ+U9pW2UYXeZJF
+# xBA2CFIpF8svpvJ+1Gkkih6PsHMNzBxKq7Kq7aeRYwFkIqgyuH4yKLNncy2RtNwx
+# AQv3Rwqm8ddK7VZgxCwIo3tAsLx0J1KH1r6I3TeKiW5niB31yV2g/rarOoDXGpc8
+# FzYiQR6sTdWD5jw4vU8w6VSp07YEwzJ2YbuwGMUrGLPAgNW3lbBeUU0i/OxYqujY
+# lLSlLu2S3ucYfCFX3VVj979tzR/SpncocMfiWzpbCNJbTsgAlrPhgzavhgplXHT2
+# 6ux6anSg8Evu75SjrFDyh+3XOjCDyft9V77l4/hByuVkrrOj7FjshZrM77nq81YY
+# uVxzmq/FdxeDWds3GhhyVKVB0rYjdaNDmuV3fJZ5t0GNv+zcgKCf0Xd1WF81E+Al
+# GmcLfc4l+gcK5GEh2NQc5QfGNpn0ltDGFf5Ozdeui53bFv0ExpK91IjmqaOqu/dk
+# ODtfzAzQNb50GQOmxapMomE2gj4d8yu8l13bS3g7LfU772Aj6PXsCyM2la+YZr9T
+# 03u4aUoqlmZpxJTG9F9urJh4iIAGXKKy7aIwgga6MIIEoqADAgECAhMzAAc2rufu
+# H4G0QASuAAAABzauMA0GCSqGSIb3DQEBDAUAMFoxCzAJBgNVBAYTAlVTMR4wHAYD
+# VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKzApBgNVBAMTIk1pY3Jvc29mdCBJ
+# RCBWZXJpZmllZCBDUyBFT0MgQ0EgMDMwHhcNMjYwOTI5MDkxNDE0WhcNMjYxMDAy
+# MDkxNDE0WjB8MQswCQYDVQQGEwJVUzEPMA0GA1UECBMGT3JlZ29uMRIwEAYDVQQH
+# EwlCZWF2ZXJ0b24xIzAhBgNVBAoTGlB5dGhvbiBTb2Z0d2FyZSBGb3VuZGF0aW9u
+# MSMwIQYDVQQDExpQeXRob24gU29mdHdhcmUgRm91bmRhdGlvbjCCAaIwDQYJKoZI
+# hvcNAQEBBQADggGPADCCAYoCggGBALMR3EsrjOoOJcocO8sl5H6JHkogAX3QOUCA
+# 6+6imuE7JW/ZXkWR7N3cReFZnVeVbT7xB0MP9wikb/gZogKFV1gNJHfgDxy1/jeI
+# 6gZ2kWI3lsSq6VTKh4Umx8VVn++Ap3wDr65HH2tVFZ2/YGkMx1fdSSX5k6aj0GRO
+# kI39t6KWsLkwVketKdARimq/6N7i3jMAqJMmhFBDHZolEE2JSm68gU6zWJbWLYcN
+# k2wN9lMGkaGKifVHE8HN/9A2/e3Pmg6zczi86cooe3hokrkVUCpvWtA689LCyfxk
+# /o53rI+0VoqkTuT26+MLs5j584fJLHhZHZ39xMJkz3z1lckH5CaQWeXczC4EBOTY
+# lMBMxt9oC4zgNDMesCq9cTyWFeQJa/ykpFamCwRyU2pjmEHddFhr2dnGEk+rGZYE
+# 1ohGLn/0ajih9L7FQpC4y8kMT7KsyHY0/NmYR0vR7dD6NSO4BobURZjkgqcaX2xl
+# 8IsjwvCvYQJ8bdpi+GDLeeyy/MvtBwIDAQABo4IB1TCCAdEwDAYDVR0TAQH/BAIw
+# ADAOBgNVHQ8BAf8EBAMCB4AwPAYDVR0lBDUwMwYKKwYBBAGCN2EBAAYIKwYBBQUH
+# AwMGGysGAQQBgjdhgqKNuwqmkohkgZH0oEWCk/3hbzAdBgNVHQ4EFgQU5nE109WE
+# AwyNVnQS4aE0pfMeBH4wHwYDVR0jBBgwFoAUa16lNMMFxWJKIVqOq3NgYtSsY4Uw
+# ZwYDVR0fBGAwXjBcoFqgWIZWaHR0cDovL3d3dy5taWNyb3NvZnQuY29tL3BraW9w
+# cy9jcmwvTWljcm9zb2Z0JTIwSUQlMjBWZXJpZmllZCUyMENTJTIwRU9DJTIwQ0El
+# MjAwMy5jcmwwdAYIKwYBBQUHAQEEaDBmMGQGCCsGAQUFBzAChlhodHRwOi8vd3d3
+# Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRzL01pY3Jvc29mdCUyMElEJTIwVmVy
+# aWZpZWQlMjBDUyUyMEVPQyUyMENBJTIwMDMuY3J0MFQGA1UdIARNMEswSQYEVR0g
+# ADBBMD8GCCsGAQUFBwIBFjNodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3Bz
+# L0RvY3MvUmVwb3NpdG9yeS5odG0wDQYJKoZIhvcNAQEMBQADggIBAAqJk3xyS3QH
+# Ol3Yp8gCp6Xf6E9ntAwQSRBtAMNo84/JsAFvNvc/8SibRF8bOTcSALYXTJddpynA
+# No3YZP0dIV60BLAZUP68FP/eeb3u2X/W2TXCBUKbqB++7UXXqXIB9xF/LKYkpQ/U
+# 6LDMztFez+Wtkgt/vo0lObrvpCE6tKxCZySou3pEVer21TnWdfAsWO8JMJy61kXs
+# bGGzRxqamo6VfD2gRQ1kcmqSihEgGF0z//lOyIRKtidN+N1JwpKY2CJkRybzhm8L
+# gBmfO5GrBmvrB65Y8QzXgPV9O9NCQdSjCO2A45FFJbp4ezm1CsdCAzp6zZxdpnjR
+# gQjCtNqDVMm3bx2LjSOioK6zEZJowdcH+oUoLg97rfB03nI5tDTg0MCc1zwH6kaW
+# MY1Y9VkAPvpX8PpdK8r3CUXmxJL5Ct2I46RYyRw9ygC3mXqe+ZhvZtGFuyUsBtsl
+# LwooPaaaT7o5D9kMvgLR0KbdjNHxNo9prFKBxzB+6+xDKyzq9Ne7uLJpnQarORbU
+# EExIWeUTOVqhuQAabTttNZfTudu/WaUQYErxQr8EMVX96r4FbT9SXumj03YvedqH
+# 9ZOGZF6JaYNTCW2mP9QP5oTqW/EM7Yyyl1u63Sttn9y+ZdjehUovvW+UaLi5o3ql
+# rEjXRyk1L3dSCev03lwvmNiF5v2lYFhLMIIHKDCCBRCgAwIBAgITMwAAABUFPm4Z
+# jpMp2QAAAAAAFTANBgkqhkiG9w0BAQwFADBjMQswCQYDVQQGEwJVUzEeMBwGA1UE
+# ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTQwMgYDVQQDEytNaWNyb3NvZnQgSUQg
+# VmVyaWZpZWQgQ29kZSBTaWduaW5nIFBDQSAyMDIxMB4XDTI2MDMyNjE4MTEyOFoX
+# DTMxMDMyNjE4MTEyOFowWjELMAkGA1UEBhMCVVMxHjAcBgNVBAoTFU1pY3Jvc29m
+# dCBDb3Jwb3JhdGlvbjErMCkGA1UEAxMiTWljcm9zb2Z0IElEIFZlcmlmaWVkIENT
+# IEVPQyBDQSAwMzCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAOD0yz0C
+# qi8Ocx4+8w574rJuEJ3z6WiTNg5GVLeQFVex55xvIbAFyx6eWblsu0wY+OIgUvMF
+# AX6CGVVX9Tb2rkZx14QQEIdNMaEvaSgistzhSuWIxFxu/2Y4y1H+Xv/ECa/QXHgE
+# kefV0e3ft++sGpeYqMp8Z/kOnI7/6GdXtMSt4y1LX2I75uNn/0eemDc8KTR7thJt
+# FMWTH3sVnBFakLizc16lF9FdCH9YwCPsmaxh5VmiGLhMXnJbYkyslmrAdzLMlli0
+# PYeWejlkQmR2JlwRrEc6hubA7TpnUn1zbemz08YiEZqrWwosQDP0OhzmsuRhYa14
+# OuxwqECnaQhz+hiUf0iPoGQ6qqBYg0SQS0Lxk0bUxqT6HejrlqPSJAqZ3Fbshloc
+# 7ly7KgyL4q1h9d4giDexUhtLYQvyRS2wMZ0So2oCr+KypOLWNeot7qIqnWeLVI92
+# 89b0bTcJOxgXrxv/K4hBHBt2gEJd6Yw0kJLR2isJFjhvZYADLieDtIA1wSCsGBl/
+# nfn5B8tTmEbOsqMilsxptq5ZvkUpZQqQyw9xcWRdFY7iego+bgpaUXKmo6lsn8o4
+# 1VF4iXEdBF6AA4HMiFEHuCv0gNDWxzYyA6BD7FUZbiirgcPSZ8CLCLIuyRmuRpDs
+# mhqdiME1xH1FLbpjEBVtwG0uK0VPMIgSDll1AgMBAAGjggHcMIIB2DAOBgNVHQ8B
+# Af8EBAMCAYYwEAYJKwYBBAGCNxUBBAMCAQAwHQYDVR0OBBYEFGtepTTDBcViSiFa
+# jqtzYGLUrGOFMFQGA1UdIARNMEswSQYEVR0gADBBMD8GCCsGAQUFBwIBFjNodHRw
+# Oi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL0RvY3MvUmVwb3NpdG9yeS5odG0w
+# GQYJKwYBBAGCNxQCBAweCgBTAHUAYgBDAEEwEgYDVR0TAQH/BAgwBgEB/wIBADAf
+# BgNVHSMEGDAWgBTZQSmwDw9jbO9p1/XNKZ6kSGow5jBwBgNVHR8EaTBnMGWgY6Bh
+# hl9odHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQl
+# MjBJRCUyMFZlcmlmaWVkJTIwQ29kZSUyMFNpZ25pbmclMjBQQ0ElMjAyMDIxLmNy
+# bDB9BggrBgEFBQcBAQRxMG8wbQYIKwYBBQUHMAKGYWh0dHA6Ly93d3cubWljcm9z
+# b2Z0LmNvbS9wa2lvcHMvY2VydHMvTWljcm9zb2Z0JTIwSUQlMjBWZXJpZmllZCUy
+# MENvZGUlMjBTaWduaW5nJTIwUENBJTIwMjAyMS5jcnQwDQYJKoZIhvcNAQEMBQAD
+# ggIBAF1uIjzPBctfyCUkSH/xDbZQwJSFYE7jpn0U+HA5HeZ2WpFUuRg6if8xzNTC
+# uMOHHdf31I8fk9J+WQahO+c71lYczlgVVik7s1i4H6Z9VIYAZnCIY4BJaTSLYHu+
+# f2cSUkmaiJfG6B8flh0GytSBO3QAU1eTOapOCT5LUfFvW7/QcKoQdVk+TYD/p4ld
+# hu2lEzkVzPTSOKxSX0FFmBJ5s4NXzlsHM696rILd/Q+ccLFEk2ExvzE/+wH9Ujul
+# /auF5JXvOpRK/y+f98gxuVd5pUiWmqirxI/0EkyMT8KhVcnGeRlBEzUVruQ33LO2
+# 9F46HFKA+ClnH9eX+OTDIQVUlMF8GnexOB8hz+maq/Z6G1qQvYASPvwSY49CiHEl
+# PfDJf4/vwYDbm0ukC/OPdEwwd3zPXxm65WL7rQwDMak4BIfUvw2Wvd9lFmdA76nL
+# J7YMK9iYdoh91SBgmqfuejHEZW/z35FoROHW2AIO/A2kUJIbu+XkDhqSj7Z/HjT2
+# v1NaNcLs6J/UhDlknMHhF/wa8GIdiO8yYemV52nUUZEt1JEVWkLf84qlljpq8ipm
+# nv7yk/9ZA/3TcN2Cu8BPpbjE84HFc9ri0aSw3dK6olqIVgdI3J4G5+fyKx66Nbgh
+# sFJscPgE+psXepn7ucb13938bb8vHiQf1wKYF+axl1KQea6QMIIHnjCCBYagAwIB
+# AgITMwAAAAeHozSje6WOHAAAAAAABzANBgkqhkiG9w0BAQwFADB3MQswCQYDVQQG
+# EwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMUgwRgYDVQQDEz9N
+# aWNyb3NvZnQgSWRlbnRpdHkgVmVyaWZpY2F0aW9uIFJvb3QgQ2VydGlmaWNhdGUg
+# QXV0aG9yaXR5IDIwMjAwHhcNMjEwNDAxMjAwNTIwWhcNMzYwNDAxMjAxNTIwWjBj
+# MQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTQw
+# MgYDVQQDEytNaWNyb3NvZnQgSUQgVmVyaWZpZWQgQ29kZSBTaWduaW5nIFBDQSAy
+# MDIxMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAsvDArxmIKOLdVHpM
+# SWxpCFUJtFL/ekr4weslKPdnF3cpTeuV8veqtmKVgok2rO0D05BpyvUDCg1wdsoE
+# tuxACEGcgHfjPF/nZsOkg7c0mV8hpMT/GvB4uhDvWXMIeQPsDgCzUGzTvoi76YDp
+# xDOxhgf8JuXWJzBDoLrmtThX01CE1TCCvH2sZD/+Hz3RDwl2MsvDSdX5rJDYVuR3
+# bjaj2QfzZFmwfccTKqMAHlrz4B7ac8g9zyxlTpkTuJGtFnLBGasoOnn5NyYlf0xF
+# 9/bjVRo4Gzg2Yc7KR7yhTVNiuTGH5h4eB9ajm1OCShIyhrKqgOkc4smz6obxO+Hx
+# KeJ9bYmPf6KLXVNLz8UaeARo0BatvJ82sLr2gqlFBdj1sYfqOf00Qm/3B4XGFPDK
+# /H04kteZEZsBRc3VT2d/iVd7OTLpSH9yCORV3oIZQB/Qr4nD4YT/lWkhVtw2v2s0
+# TnRJubL/hFMIQa86rcaGMhNsJrhysLNNMeBhiMezU1s5zpusf54qlYu2v5sZ5zL0
+# KvBDLHtL8F9gn6jOy3v7Jm0bbBHjrW5yQW7S36ALAt03QDpwW1JG1Hxu/FUXJbBO
+# 2AwwVG4Fre+ZQ5Od8ouwt59FpBxVOBGfN4vN2m3fZx1gqn52GvaiBz6ozorgIEjn
+# +PhUXILhAV5Q/ZgCJ0u2+ldFGjcCAwEAAaOCAjUwggIxMA4GA1UdDwEB/wQEAwIB
+# hjAQBgkrBgEEAYI3FQEEAwIBADAdBgNVHQ4EFgQU2UEpsA8PY2zvadf1zSmepEhq
+# MOYwVAYDVR0gBE0wSzBJBgRVHSAAMEEwPwYIKwYBBQUHAgEWM2h0dHA6Ly93d3cu
+# bWljcm9zb2Z0LmNvbS9wa2lvcHMvRG9jcy9SZXBvc2l0b3J5Lmh0bTAZBgkrBgEE
+# AYI3FAIEDB4KAFMAdQBiAEMAQTAPBgNVHRMBAf8EBTADAQH/MB8GA1UdIwQYMBaA
+# FMh+0mqFKhvKGZgEByfPUBBPaKiiMIGEBgNVHR8EfTB7MHmgd6B1hnNodHRwOi8v
+# d3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQlMjBJZGVudGl0
+# eSUyMFZlcmlmaWNhdGlvbiUyMFJvb3QlMjBDZXJ0aWZpY2F0ZSUyMEF1dGhvcml0
+# eSUyMDIwMjAuY3JsMIHDBggrBgEFBQcBAQSBtjCBszCBgQYIKwYBBQUHMAKGdWh0
+# dHA6Ly93d3cubWljcm9zb2Z0LmNvbS9wa2lvcHMvY2VydHMvTWljcm9zb2Z0JTIw
+# SWRlbnRpdHklMjBWZXJpZmljYXRpb24lMjBSb290JTIwQ2VydGlmaWNhdGUlMjBB
+# dXRob3JpdHklMjAyMDIwLmNydDAtBggrBgEFBQcwAYYhaHR0cDovL29uZW9jc3Au
+# bWljcm9zb2Z0LmNvbS9vY3NwMA0GCSqGSIb3DQEBDAUAA4ICAQB/JSqe/tSr6t1m
+# CttXI0y6XmyQ41uGWzl9xw+WYhvOL47BV09Dgfnm/tU4ieeZ7NAR5bguorTCNr58
+# HOcA1tcsHQqt0wJsdClsu8bpQD9e/al+lUgTUJEV80Xhco7xdgRrehbyhUf4pkeA
+# hBEjABvIUpD2LKPho5Z4DPCT5/0TlK02nlPwUbv9URREhVYCtsDM+31OFU3fDV8B
+# mQXv5hT2RurVsJHZgP4y26dJDVF+3pcbtvh7R6NEDuYHYihfmE2HdQRq5jRvLE1E
+# b59PYwISFCX2DaLZ+zpU4bX0I16ntKq4poGOFaaKtjIA1vRElItaOKcwtc04CBrX
+# SfyL2Op6mvNIxTk4OaswIkTXbFL81ZKGD+24uMCwo/pLNhn7VHLfnxlMVzHQVL+b
+# Ha9KhTyzwdG/L6uderJQn0cGpLQMStUuNDArxW2wF16QGZ1NtBWgKA8Kqv48M8Hf
+# FqNifN6+zt6J0GwzvU8g0rYGgTZR8zDEIJfeZxwWDHpSxB5FJ1VVU1LIAtB7o9PX
+# bjXzGifaIMYTzU4YKt4vMNwwBmetQDHhdAtTPplOXrnI9SI6HeTtjDD3iUN/7ygb
+# ahmYOHk7VB7fwT4ze+ErCbMh6gHV1UuXPiLciloNxH6K4aMfZN1oLVk6YFeIJEok
+# uPgNPa6EnTiOL60cPqfny+Fq8UiuZzGCGuYwghriAgEBMHEwWjELMAkGA1UEBhMC
+# VVMxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjErMCkGA1UEAxMiTWlj
+# cm9zb2Z0IElEIFZlcmlmaWVkIENTIEVPQyBDQSAwMwITMwAHNq7n7h+BtEAErgAA
+# AAc2rjANBglghkgBZQMEAgEFAKCBsjAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIB
+# BDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg
+# Kld7dFLdvZygPQIm94QeWCWq09RhnYWpKs5R8/oLpjgwRgYKKwYBBAGCNwIBDDE4
+# MDagMIAuAFAAeQB0AGgAbwBuACAAMwAuADEANAAuADgAIAAoADgAZQA2AGUANwA1
+# AGQAKaECgAAwDQYJKoZIhvcNAQEBBQAEggGAW7gaUcBEmUaW3Jkr/+62ihGtH4SO
+# 1dv0s2fnfmzxNPfxGv3oxy2dREo/cxZnHkE9RPPIQ8fljblvk05JnGUjoG9UWfqR
+# OGlRN4bfUa7s183e1wR8Feyrij+qAeNncA0zMPhIPrHs0P3hVIgYitloYEXyUvDt
+# z/eZfBCQWNHlSEXBz6r4/DD2gYU7aIhQhC8KjxyfP7ScM+ugsbNxn2ba4fkbm6sh
+# xlrnY02lJmhSxGYwiiKFjGi0y4zs0lpef1hsl6jQUxOnejYgck2XVlvTKr9uKBXW
+# 5rI6dllqWKEA/2Gl26knW1+fvdl9eQRLLRt5vQvFIMTSBAW90prrygfEMtrSvxmX
+# t94E6u74ha+uYEjIeyplMs7acprPCx+pMAz2fAFFnZkGpCct02w7F8gp0mvMI50N
+# ohjZT3jNVFOKrrethqI4o2zyCfemUoVtmzUcRp9QzKudQCFeeTqppYKNLQmE+1Ch
+# i0nfbvU/CU5UDrQA9pYWxraWR55UMnfa13QVoYIYETCCGA0GCisGAQQBgjcDAwEx
+# ghf9MIIX+QYJKoZIhvcNAQcCoIIX6jCCF+YCAQMxDzANBglghkgBZQMEAgEFADCC
+# AWIGCyqGSIb3DQEJEAEEoIIBUQSCAU0wggFJAgEBBgorBgEEAYRZCgMBMDEwDQYJ
+# YIZIAWUDBAIBBQAEIJlDG660fU3YD+VWTmNpKUvnCbGOTzwXXTsTzoUi1lSfAgZq
+# qUswSd4YEzIwMjYwOTMwMTkwNTUzLjg5NVowBIACAfSggeGkgd4wgdsxCzAJBgNV
+# BAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4w
+# HAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJTAjBgNVBAsTHE1pY3Jvc29m
+# dCBBbWVyaWNhIE9wZXJhdGlvbnMxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo3
+# QTAwLTA1RTAtRDk0NzE1MDMGA1UEAxMsTWljcm9zb2Z0IFB1YmxpYyBSU0EgVGlt
+# ZSBTdGFtcGluZyBBdXRob3JpdHmggg8hMIIHgjCCBWqgAwIBAgITMwAAAAXlzw//
+# Zi7JhwAAAAAABTANBgkqhkiG9w0BAQwFADB3MQswCQYDVQQGEwJVUzEeMBwGA1UE
+# ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMUgwRgYDVQQDEz9NaWNyb3NvZnQgSWRl
+# bnRpdHkgVmVyaWZpY2F0aW9uIFJvb3QgQ2VydGlmaWNhdGUgQXV0aG9yaXR5IDIw
+# MjAwHhcNMjAxMTE5MjAzMjMxWhcNMzUxMTE5MjA0MjMxWjBhMQswCQYDVQQGEwJV
+# UzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTIwMAYDVQQDEylNaWNy
+# b3NvZnQgUHVibGljIFJTQSBUaW1lc3RhbXBpbmcgQ0EgMjAyMDCCAiIwDQYJKoZI
+# hvcNAQEBBQADggIPADCCAgoCggIBAJ5851Jj/eDFnwV9Y7UGIqMcHtfnlzPREwW9
+# ZUZHd5HBXXBvf7KrQ5cMSqFSHGqg2/qJhYqOQxwuEQXG8kB41wsDJP5d0zmLYKAY
+# 8Zxv3lYkuLDsfMuIEqvGYOPURAH+Ybl4SJEESnt0MbPEoKdNihwM5xGv0rGofJ1q
+# OYSTNcc55EbBT7uq3wx3mXhtVmtcCEr5ZKTkKKE1CxZvNPWdGWJUPC6e4uRfWHIh
+# ZcgCsJ+sozf5EeH5KrlFnxpjKKTavwfFP6XaGZGWUG8TZaiTogRoAlqcevbiqioU
+# z1Yt4FRK53P6ovnUfANjIgM9JDdJ4e0qiDRm5sOTiEQtBLGd9Vhd1MadxoGcHrRC
+# sS5rO9yhv2fjJHrmlQ0EIXmp4DhDBieKUGR+eZ4CNE3ctW4uvSDQVeSp9h1SaPV8
+# UWEfyTxgGjOsRpeexIveR1MPTVf7gt8hY64XNPO6iyUGsEgt8c2PxF87E+CO7A28
+# TpjNq5eLiiunhKbq0XbjkNoU5JhtYUrlmAbpxRjb9tSreDdtACpm3rkpxp7AQndn
+# I0Shu/fk1/rE3oWsDqMX3jjv40e8KN5YsJBnczyWB4JyeeFMW3JBfdeAKhzohFe8
+# U5w9WuvcP1E8cIxLoKSDzCCBOu0hWdjzKNu8Y5SwB1lt5dQhABYyzR3dxEO/T1K/
+# BVF3rV69AgMBAAGjggIbMIICFzAOBgNVHQ8BAf8EBAMCAYYwEAYJKwYBBAGCNxUB
+# BAMCAQAwHQYDVR0OBBYEFGtpKDo1L0hjQM972K9J6T7ZPdshMFQGA1UdIARNMEsw
+# SQYEVR0gADBBMD8GCCsGAQUFBwIBFjNodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20v
+# cGtpb3BzL0RvY3MvUmVwb3NpdG9yeS5odG0wEwYDVR0lBAwwCgYIKwYBBQUHAwgw
+# GQYJKwYBBAGCNxQCBAweCgBTAHUAYgBDAEEwDwYDVR0TAQH/BAUwAwEB/zAfBgNV
+# HSMEGDAWgBTIftJqhSobyhmYBAcnz1AQT2ioojCBhAYDVR0fBH0wezB5oHegdYZz
+# aHR0cDovL3d3dy5taWNyb3NvZnQuY29tL3BraW9wcy9jcmwvTWljcm9zb2Z0JTIw
+# SWRlbnRpdHklMjBWZXJpZmljYXRpb24lMjBSb290JTIwQ2VydGlmaWNhdGUlMjBB
+# dXRob3JpdHklMjAyMDIwLmNybDCBlAYIKwYBBQUHAQEEgYcwgYQwgYEGCCsGAQUF
+# BzAChnVodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRzL01pY3Jv
+# c29mdCUyMElkZW50aXR5JTIwVmVyaWZpY2F0aW9uJTIwUm9vdCUyMENlcnRpZmlj
+# YXRlJTIwQXV0aG9yaXR5JTIwMjAyMC5jcnQwDQYJKoZIhvcNAQEMBQADggIBAF+I
+# dsd+bbVaFXXnTHho+k7h2ESZJRWluLE0Oa/pO+4ge/XEizXvhs0Y7+KVYyb4nHlu
+# gBesnFqBGEdC2IWmtKMyS1OWIviwpnK3aL5JedwzbeBF7POyg6IGG/XhhJ3UqWeW
+# TO+Czb1c2NP5zyEh89F72u9UIw+IfvM9lzDmc2O2END7MPnrcjWdQnrLn1Ntday7
+# JSyrDvBdmgbNnCKNZPmhzoa8PccOiQljjTW6GePe5sGFuRHzdFt8y+bN2neF7Zu8
+# hTO1I64XNGqst8S+w+RUdie8fXC1jKu3m9KGIqF4aldrYBamyh3g4nJPj/LR2CBa
+# LyD+2BuGZCVmoNR/dSpRCxlot0i79dKOChmoONqbMI8m04uLaEHAv4qwKHQ1vBzb
+# V/nG89LDKbRSSvijmwJwxRxLLpMQ/u4xXxFfR4f/gksSkbJp7oqLwliDm/h+w0aJ
+# /U5ccnYhYb7vPKNMN+SZDWycU5ODIRfyoGl59BsXR/HpRGtiJquOYGmvA/pk5vC1
+# lcnbeMrcWD/26ozePQ/TWfNXKBOmkFpvPE8CH+EeGGWzqTCjdAsno2jzTeNSxlx3
+# glDGJgcdz5D/AAxw9Sdgq/+rY7jjgs7X6fqPTXPmaCAJKVHAP19oEjJIBwD1LyHb
+# aEgBxFCogYSOiUIr0Xqcr1nJfiWG2GwYe6ZoAF1bMIIHlzCCBX+gAwIBAgITMwAA
+# AFhlzes/odf80gAAAAAAWDANBgkqhkiG9w0BAQwFADBhMQswCQYDVQQGEwJVUzEe
+# MBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTIwMAYDVQQDEylNaWNyb3Nv
+# ZnQgUHVibGljIFJTQSBUaW1lc3RhbXBpbmcgQ0EgMjAyMDAeFw0yNTEwMjMyMDQ2
+# NTVaFw0yNjEwMjIyMDQ2NTVaMIHbMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2Fz
+# aGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENv
+# cnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRpb25z
+# MScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046N0EwMC0wNUUwLUQ5NDcxNTAzBgNV
+# BAMTLE1pY3Jvc29mdCBQdWJsaWMgUlNBIFRpbWUgU3RhbXBpbmcgQXV0aG9yaXR5
+# MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAnXg0pHaQ7PVAlln+HZZr
+# JFcLoKbekhW1yL+QNBUgFFUsjZIKaqqN4oIJsJM3ps0rJNSO7ndCNRuZDX2Wgur3
+# Ak77eXrloBXqZmO6ZVXeDNRCLldW4A0/NfjzJ7XXkdEhjr81ghXEpR7zC+wbaNN+
+# sPSxzLAZBeibDFP7Xws5wX0ZtIsN1a2+Xq5bvWp3kRMytwskTjunRgeLZL/tBp23
+# 7JVdRPFAQ9jYRKpCqUBo/v1xjBLRCV3PalKjnGfb3MN4U7jVyqifFHShcnW5CERR
+# oBmUa6sygDzFSr8e3g93TPNLFUivUE0GmLfbX5ceD1Gt1FcZ6x/JLVATzk5+BWHb
+# MxwJIVkVPTqSSMjQ6KTKdcnq3pH0c4AFJp/glvcpq0U9fzZIjJGGvdpishlRl77R
+# QtUhSjxHvCn3LC/xqQQwOHSQDsGh6NX2D0RfsSyEtTAByAae+2w1HByTDTcmlTNL
+# EuQLeCj1gNBdIWj0WOYyDtjjQ/8iTWY6ey1vb9qHljIj5HgIndT5P9MYk2Vg2e7h
+# KUZNBNbA/hsgBsuoZ+IX89WvjEN9abF91S4OJVuinmKsLO/MLbnl7ikuD0dN6oA0
+# YewyDQncs12sM9HOtu72QA/TZlefvW8r9xtMXAYoQlcGjsk8W4Uc7cfqVqbIPjdo
+# c8ZxBzLcXcVyP4p5cyLwvkMCAwEAAaOCAcswggHHMB0GA1UdDgQWBBRyjU3Fer4V
+# xXJ+hjPcRJnxnRIJsDAfBgNVHSMEGDAWgBRraSg6NS9IY0DPe9ivSek+2T3bITBs
+# BgNVHR8EZTBjMGGgX6BdhltodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3Bz
+# L2NybC9NaWNyb3NvZnQlMjBQdWJsaWMlMjBSU0ElMjBUaW1lc3RhbXBpbmclMjBD
+# QSUyMDIwMjAuY3JsMHkGCCsGAQUFBwEBBG0wazBpBggrBgEFBQcwAoZdaHR0cDov
+# L3d3dy5taWNyb3NvZnQuY29tL3BraW9wcy9jZXJ0cy9NaWNyb3NvZnQlMjBQdWJs
+# aWMlMjBSU0ElMjBUaW1lc3RhbXBpbmclMjBDQSUyMDIwMjAuY3J0MAwGA1UdEwEB
+# /wQCMAAwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwgwDgYDVR0PAQH/BAQDAgeAMGYG
+# A1UdIARfMF0wUQYMKwYBBAGCN0yDfQEBMEEwPwYIKwYBBQUHAgEWM2h0dHA6Ly93
+# d3cubWljcm9zb2Z0LmNvbS9wa2lvcHMvRG9jcy9SZXBvc2l0b3J5Lmh0bTAIBgZn
+# gQwBBAIwDQYJKoZIhvcNAQEMBQADggIBAHvrxIiVF1iHcXvxrJTCD8eOtbPUbK9x
+# +Lz70iYehh+G0UoOMcMf04QD6tQPTeZ5HhGETkcn0raDJ5NpfbRBuKEH31rxbZK9
+# 7o12KRDNJ3Nu4ePaUIpH/TcWz8PLVOCECywSxbEgEG20kyydGc46c591tXzpfkJD
+# ckjoYrypaerdeQLRQH9LaoTYZfdAzMo+Dy0O1DzFJkF5YnsmAM8lt9r1NtXdFjdb
+# FMCbV5dau64mV22s186A8Umi+l239+Ue0cbJQIykWhIlhhWhxQgoksqHz7kp2GFZ
+# AAeySTmIOQOWyXOA8JA8TISJyn3JDOgStv583P3V0QSALT6JXDCW26FV208VGJMz
+# kv0S22iOTZJ/oamTpk8RzD8oWT8pfbe1q/k/bxPiXYRbzps96a5YOko7n0Vdo61D
+# OJhL/mhk01Y348gq6vhG/VTcdGHh1rCkwOM05B35AZZq9AtPpfRzJinrHzzGRx+r
+# 6fD3ccYMPMMX/Nwd2irzrph172fQcSf1fMwvwIhmfH4GWJJ+mf1HA6uXoAOVByck
+# guXvlj8gPi7T2ES6RU8+QssfqTNTJKjsBheWKWv2W4ESVen2L7lCz7i79FhA+0kp
+# 0yXJnYwdzWS0ovTINULINmzVyMcSUm5WuVf8YZ33cAud2Opr6N1+RuLZDavDvjie
+# hlI5dH+GEy56MYIHQzCCBz8CAQEweDBhMQswCQYDVQQGEwJVUzEeMBwGA1UEChMV
+# TWljcm9zb2Z0IENvcnBvcmF0aW9uMTIwMAYDVQQDEylNaWNyb3NvZnQgUHVibGlj
+# IFJTQSBUaW1lc3RhbXBpbmcgQ0EgMjAyMAITMwAAAFhlzes/odf80gAAAAAAWDAN
+# BglghkgBZQMEAgEFAKCCBJwwEQYLKoZIhvcNAQkQAg8xAgUAMBoGCSqGSIb3DQEJ
+# AzENBgsqhkiG9w0BCRABBDAcBgkqhkiG9w0BCQUxDxcNMjYwOTMwMTkwNTUzWjAv
+# BgkqhkiG9w0BCQQxIgQgfF/tM/eiEX+U1UpMQ+sDL/YgqElaG6dBBgOxx78qpKYw
+# gbkGCyqGSIb3DQEJEAIvMYGpMIGmMIGjMIGgBCDFIlS7sgfQ+wAo1cWbWz+WN69V
+# Bds58hbran919aLocTB8MGWkYzBhMQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWlj
+# cm9zb2Z0IENvcnBvcmF0aW9uMTIwMAYDVQQDEylNaWNyb3NvZnQgUHVibGljIFJT
+# QSBUaW1lc3RhbXBpbmcgQ0EgMjAyMAITMwAAAFhlzes/odf80gAAAAAAWDCCA14G
+# CyqGSIb3DQEJEAISMYIDTTCCA0mhggNFMIIDQTCCAikCAQEwggEJoYHhpIHeMIHb
+# MQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVk
+# bW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQLExxN
+# aWNyb3NvZnQgQW1lcmljYSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxkIFRT
+# UyBFU046N0EwMC0wNUUwLUQ5NDcxNTAzBgNVBAMTLE1pY3Jvc29mdCBQdWJsaWMg
+# UlNBIFRpbWUgU3RhbXBpbmcgQXV0aG9yaXR5oiMKAQEwBwYFKw4DAhoDFQCdZHkb
+# 26ercF2O62vCdZUfUSvEXKBnMGWkYzBhMQswCQYDVQQGEwJVUzEeMBwGA1UEChMV
+# TWljcm9zb2Z0IENvcnBvcmF0aW9uMTIwMAYDVQQDEylNaWNyb3NvZnQgUHVibGlj
+# IFJTQSBUaW1lc3RhbXBpbmcgQ0EgMjAyMDANBgkqhkiG9w0BAQsFAAIFAO5nkBAw
+# IhgPMjAyNjA5MzAxMzQxMzZaGA8yMDI2MTAwMTEzNDEzNlowdDA6BgorBgEEAYRZ
+# CgQBMSwwKjAKAgUA7meQEAIBADAHAgEAAgIcqjAHAgEAAgISJTAKAgUA7mjhkAIB
+# ADA2BgorBgEEAYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQow
+# CAIBAAIDAYagMA0GCSqGSIb3DQEBCwUAA4IBAQCJK/43ywtIVA1nl02HrNJ3XTmv
+# lZl5mRKmkPDUHXkBgaqW/v2jn8zdadTjCjNF4/Lu/KsdAfCPJC0A4mfh7s/gZ3sf
+# ER9Lcu1H46c0wiCyJhsqt2D4hhGXoZNshFQnfu6DqUvmIvTtDR322rfPSlIQfDUg
+# 6m0zz6HX7ZBZsawYQSUT5KwMMQrB8SOCeY6INo2o95gd2QKH0LwMErPShr7AnhGo
+# ENtsOJIK7t5J+q/qsdZ50kEDxDBOI4FTC54wdbJWzSeB/+viXZEAnaq2tsXA9Sfi
+# 72ORzsXT0wX4qJVeeQola52f4YjMiCjcBitBAA2vuZ47AjjF6n+K6ajpydT6MA0G
+# CSqGSIb3DQEBAQUABIICAADNSUutmv4SLP8lyPzPOveoc3FFBuGiZmIlsh1rDK2y
+# 8B24VQpJ/exbCsF7qDH/6iKxGr8SlwunEG6W0JDNu2sWaAlkg3XE8ubt0839F0Jo
+# fKXSol0GULo8zAZlK4A25Wo9IRoR2MizLcMtnX7yiibgXsSBdN9ancQJUb6yTtR/
+# KGYSxE8byPmuShLLBQAtbsJHMcNKSZ3P8ixbFW9YAHyvkPuRImutfLvaqSI+C/zO
+# fdZPkl3dFjEUGbrM+1zQlWF4BHwp8iX0jE4PfvZClMehTU9Xn1eCzVmjDXq5oGvi
+# F4cGhNyU5vxuT1E3Hi0c73SaTW19R/UiZOY/eN06M37pRLM0My7fiFGDWlhWnCvF
+# LPYyaCO/XgKxy8Z/Tim1xXe3LQ3it+Yd9uMr2cNfmxmdK1guXTbOJAbHw4SlVsSs
+# 4lu7EH7paj8NF2AyodcxJZPXhLObBtGEPECcEasRm0lwittdzK73u/o6+9uFGMzQ
+# iOuiG9gfkMS4XwoUWY/iKN4yHlrlHIzpWfYvbltxs58rRG2uU3YJ/A71mqwkve5Z
+# 9myU1T0cvoF5XeVfk72esyCQcjUCAhNrYNO1sJcelaR5lz2C8lLJw8ag8XGEdfN2
+# CB2q973+jLzJPk1AEBR3mLMcHzKSaca5Uro8RkY+EQ16HkrwiPHkKOfdt4+sEtIH
+# SIG # End signature block
