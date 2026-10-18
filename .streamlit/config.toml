@@ -1,0 +1,26 @@
+# Secure Shift - Streamlit runtime + theme
+# Native widgets (checkboxes, toggles, tabs, focus rings) pick up these colours,
+# so nothing falls back to Streamlit's default red.
+
+[theme]
+base = "light"
+primaryColor = "#1D5FD1"
+backgroundColor = "#F4F6FA"
+secondaryBackgroundColor = "#EDF1F7"
+textColor = "#0F1B2D"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"   # hides Deploy / developer menu for viewers
+
+[server]
+headless = true
+maxUploadSize = 2          # MB - artifacts are capped at 400 KB in the app anyway
+enableStaticServing = false
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[logger]
+level = "info"
