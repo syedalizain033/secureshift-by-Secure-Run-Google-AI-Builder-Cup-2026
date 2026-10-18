@@ -1,0 +1,20 @@
+# Files excluded from `gcloud run deploy --source .` uploads
+.gcloudignore
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*service-account*.json
+firebase-service-account.json
+data/
+logs/
+tests/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+*.db
+*.db-wal
+*.db-shm

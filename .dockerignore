@@ -1,0 +1,19 @@
+# Never ship secrets or local state in the image
+.env
+.env.*
+!.env.example
+*service-account*.json
+firebase-service-account.json
+data/
+logs/
+tests/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.venv/
+venv/
+.DS_Store
+*.db
+*.db-wal
+*.db-shm

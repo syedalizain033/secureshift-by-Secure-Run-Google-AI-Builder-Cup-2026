@@ -1,0 +1,13 @@
+.env
+*service-account*.json
+firebase-service-account.json
+data/
+logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+*.db
+*.db-wal
+*.db-shm
