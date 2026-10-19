@@ -46,7 +46,7 @@ DEMO_MODE = _bool("DEMO_MODE", True)  # shows the "Demo" ribbon and "Demo Login"
 # Gemini
 # ------------------------------------------------------------------
 # Demo only: key committed on purpose so the container needs no env vars. Prod sets GEMINI_API_KEY instead.
-DEMO_GEMINI_API_KEY = "AQ.Ab8RN6LW1IOQGVE6gfvcc_VmkEWQwDU7Yr9Bi73Ha64UTv0N1w"
+DEMO_GEMINI_API_KEY = "AQ.Ab8RN6K27ogHz-033It8bUfCJrHCeJ5D-GQ2nbMEh5dzngA0cg"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or ("" if DEMO_GEMINI_API_KEY.startswith("PASTE_") else DEMO_GEMINI_API_KEY)
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-3.8-flash")
 
