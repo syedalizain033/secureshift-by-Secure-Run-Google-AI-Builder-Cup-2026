@@ -691,7 +691,9 @@ def render_sidebar():
         else:
             st.markdown(chip("API key required", "warn"), unsafe_allow_html=True)
         with st.expander("Use a different API key"):
-            st.text_input("Gemini API key", type="password", key="api_key_override",
+            # "new-password" stops password managers autofilling the login password here,
+            # which would silently override the server key.
+            st.text_input("Gemini API key", type="password", key="api_key_override", autocomplete="new-password",
                           help="Used for this browser session only. Never saved.")
         st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
         st.button("Sign out", key="signout_btn", on_click=sign_out, icon=":material/logout:", **stretch(st.button))

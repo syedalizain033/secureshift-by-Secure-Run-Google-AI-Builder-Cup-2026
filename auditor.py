@@ -257,7 +257,16 @@ def _parse_json(text: str) -> dict:
 def _friendly(code, message: str) -> str:
     msg = message or ""
     if code in (400, 401, 403) and ("API key" in msg or "API_KEY" in msg or code in (401, 403)):
-        return "The Gemini API key was rejected. Check GEMINI_API_KEY (or the key override in the sidebar)."
+        low = msg.lower()
+        if "leaked" in low:
+            hint = "Google disabled this key because it was found in public code. Create a new key in AI Studio."
+        elif "service_disabled" in low or "has not been used" in low or "is disabled" in low:
+            hint = "The Generative Language API is not enabled in the key's project. Create the key in AI Studio, or enable the API."
+        elif "blocked" in low or "restrict" in low or "referer" in low:
+            hint = "The key has API or application restrictions that block Gemini. Remove them in Cloud Console > Credentials."
+        else:
+            hint = "Check GEMINI_API_KEY in config.py, or clear the key override in the sidebar."
+        return f"The Gemini API key was rejected ({code}). {hint} Google said: {msg[:200]}"
     if code == 429:
         return "Gemini quota exhausted for this key. Free-tier keys allow about 20 requests per model per day; enable billing on the Google Cloud project for production use."
     if code in (500, 502, 503, 504):

@@ -1,3 +1,4 @@
+### NOTE: Recommended to use your own API Key by pasting it in the Left Menu Bar by clicking "Use a different API key"
 # Secure Shift · Shift-Left GRC Gateway (Demo)
 
 Adversarial AI lead auditor that cross-examines Terraform/SQL artifacts for **IdentityAI** against SOC 2, CCPA and GLBA controls.
